@@ -9,6 +9,7 @@
 # =============================================================================
 
 import os
+import math
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -77,6 +78,8 @@ def last_val(df: pd.DataFrame, col: str) -> float:
         return np.nan
 
 def safe_metric_fmt(val, kind="num"):
+    """Format scalars for metric display while tolerating pandas objects."""
+    val = get_scalar(val)
     if not isinstance(val, (int, float, np.floating)) or np.isnan(val):
         return "N/A"
     if kind == "money_b":
@@ -293,18 +296,74 @@ def compute_drawdown_curve(series: pd.Series) -> pd.Series:
     peak = series.cummax()
     return (series / peak) - 1.0
 
+def _normalize_price_series(close_like) -> pd.Series:
+    """Return a 1D float Series from many possible close-price inputs."""
+    if close_like is None:
+        return pd.Series(dtype=float)
+
+    if isinstance(close_like, pd.DataFrame):
+        if close_like.empty:
+            return pd.Series(dtype=float)
+        numeric = close_like.select_dtypes(include=[np.number])
+        if numeric.empty:
+            numeric = close_like.apply(pd.to_numeric, errors="coerce")
+        series = numeric.squeeze()
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+    elif isinstance(close_like, pd.Series):
+        series = close_like
+    else:
+        try:
+            series = pd.Series(close_like)
+        except Exception:
+            return pd.Series(dtype=float)
+
+    series = pd.to_numeric(series, errors="coerce")
+    return series.dropna()
+
+
+def _to_float(val) -> float:
+    """Best-effort conversion of statistics to plain floats."""
+    if val is None:
+        return np.nan
+
+    if isinstance(val, pd.DataFrame):
+        if val.empty:
+            return np.nan
+        val = val.select_dtypes(include=[np.number])
+        if val.empty:
+            return np.nan
+        arr = val.to_numpy().ravel()
+        return float(arr[0]) if arr.size else np.nan
+
+    if isinstance(val, pd.Series):
+        if val.empty:
+            return np.nan
+        return float(val.dropna().iloc[0]) if val.dropna().size else np.nan
+
+    try:
+        return float(val)
+    except Exception:
+        try:
+            arr = np.asarray(val, dtype=float).ravel()
+            return float(arr[0]) if arr.size else np.nan
+        except Exception:
+            return np.nan
+
+
 def compute_risk_metrics(close: pd.Series, risk_free_rate: float = 0.02) -> dict:
     """Return key risk metrics for a close-price series."""
-    if close is None or close.empty:
+    close_series = _normalize_price_series(close)
+    if close_series.empty:
         return {}
 
-    returns = close.pct_change().dropna()
+    returns = close_series.pct_change().dropna()
     if returns.empty:
         return {}
 
     stats: dict[str, float] = {}
-    daily_mean = returns.mean()
-    daily_vol = returns.std()
+    daily_mean = _to_float(returns.mean())
+    daily_vol = _to_float(returns.std())
 
     stats["daily_return"] = float(daily_mean)
     stats["daily_vol"] = float(daily_vol)
@@ -313,37 +372,41 @@ def compute_risk_metrics(close: pd.Series, risk_free_rate: float = 0.02) -> dict
     log_ret = np.log1p(returns)
     annual_return = float(np.exp(log_ret.mean() * 252) - 1)
     stats["annual_return"] = annual_return
-    annual_vol = float(daily_vol * np.sqrt(252)) if not np.isnan(daily_vol) else np.nan
+    annual_vol = (
+        float(daily_vol * np.sqrt(252))
+        if math.isfinite(float(daily_vol))
+        else np.nan
+    )
     stats["annual_vol"] = annual_vol
 
     excess_return = annual_return - risk_free_rate
     stats["sharpe"] = (
         float(excess_return / annual_vol)
-        if annual_vol and not np.isnan(annual_vol)
+        if math.isfinite(float(annual_vol)) and float(annual_vol) != 0
         else np.nan
     )
 
-    downside = returns[returns < 0].std()
+    downside = _to_float(returns[returns < 0].std())
     annual_downside = (
         float(downside * np.sqrt(252))
-        if downside and not np.isnan(downside)
+        if math.isfinite(float(downside)) and float(downside) != 0
         else np.nan
     )
     stats["sortino"] = (
         float(excess_return / annual_downside)
-        if annual_downside and not np.isnan(annual_downside)
+        if math.isfinite(float(annual_downside)) and float(annual_downside) != 0
         else np.nan
     )
 
     var_level = 0.95
-    var = returns.quantile(1 - var_level)
-    stats["var"] = float(var)
+    var = _to_float(returns.quantile(1 - var_level))
+    stats["var"] = var
     tail = returns[returns <= var]
-    stats["cvar"] = float(tail.mean()) if not tail.empty else np.nan
+    stats["cvar"] = _to_float(tail.mean()) if not tail.empty else np.nan
 
     equity_curve = (1 + returns).cumprod()
     drawdown = compute_drawdown_curve(equity_curve)
-    stats["max_drawdown"] = float(drawdown.min()) if not drawdown.empty else np.nan
+    stats["max_drawdown"] = _to_float(drawdown.min()) if not drawdown.empty else np.nan
 
     return stats
 

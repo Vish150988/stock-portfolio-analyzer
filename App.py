@@ -293,6 +293,60 @@ def compute_drawdown_curve(series: pd.Series) -> pd.Series:
     peak = series.cummax()
     return (series / peak) - 1.0
 
+def compute_risk_metrics(close: pd.Series, risk_free_rate: float = 0.02) -> dict:
+    """Return key risk metrics for a close-price series."""
+    if close is None or close.empty:
+        return {}
+
+    returns = close.pct_change().dropna()
+    if returns.empty:
+        return {}
+
+    stats: dict[str, float] = {}
+    daily_mean = returns.mean()
+    daily_vol = returns.std()
+
+    stats["daily_return"] = float(daily_mean)
+    stats["daily_vol"] = float(daily_vol)
+
+    # Geometric annualized return using log returns for numerical stability
+    log_ret = np.log1p(returns)
+    annual_return = float(np.exp(log_ret.mean() * 252) - 1)
+    stats["annual_return"] = annual_return
+    annual_vol = float(daily_vol * np.sqrt(252)) if not np.isnan(daily_vol) else np.nan
+    stats["annual_vol"] = annual_vol
+
+    excess_return = annual_return - risk_free_rate
+    stats["sharpe"] = (
+        float(excess_return / annual_vol)
+        if annual_vol and not np.isnan(annual_vol)
+        else np.nan
+    )
+
+    downside = returns[returns < 0].std()
+    annual_downside = (
+        float(downside * np.sqrt(252))
+        if downside and not np.isnan(downside)
+        else np.nan
+    )
+    stats["sortino"] = (
+        float(excess_return / annual_downside)
+        if annual_downside and not np.isnan(annual_downside)
+        else np.nan
+    )
+
+    var_level = 0.95
+    var = returns.quantile(1 - var_level)
+    stats["var"] = float(var)
+    tail = returns[returns <= var]
+    stats["cvar"] = float(tail.mean()) if not tail.empty else np.nan
+
+    equity_curve = (1 + returns).cumprod()
+    drawdown = compute_drawdown_curve(equity_curve)
+    stats["max_drawdown"] = float(drawdown.min()) if not drawdown.empty else np.nan
+
+    return stats
+
 @st.cache_data(show_spinner=False)
 def run_portfolio_simulation(returns_df, num_portfolios=10000, rf=0.02):
     cols = returns_df.columns
@@ -433,6 +487,33 @@ if run and analysis_type == "Single Stock":
             if not np.isnan(rsi_v): k2.metric("RSI", f"{rsi_v:.1f}")
             if not np.isnan(macd) and not np.isnan(macd_sig): k3.metric("MACD−Signal", f"{macd - macd_sig:.3f}")
             if not np.isnan(sma50) and not np.isnan(sma200): k4.metric("SMA50−SMA200", f"{sma50 - sma200:.2f}")
+
+            risk_stats = compute_risk_metrics(price["Close"])
+            if risk_stats:
+                st.markdown("##### Historical Risk Snapshot")
+                display_metrics = [
+                    ("Annualized Return", risk_stats.get("annual_return"), "pct"),
+                    ("Annualized Volatility", risk_stats.get("annual_vol"), "pct"),
+                    ("Sharpe (Rf=2%)", risk_stats.get("sharpe"), "num"),
+                    ("Sortino Ratio", risk_stats.get("sortino"), "num"),
+                    ("Value at Risk (95%)", risk_stats.get("var"), "pct"),
+                    ("Conditional VaR (95%)", risk_stats.get("cvar"), "pct"),
+                    ("Max Drawdown", risk_stats.get("max_drawdown"), "pct"),
+                ]
+
+                for idx in range(0, len(display_metrics), 3):
+                    cols = st.columns(3)
+                    for col, (label, value, kind) in zip(cols, display_metrics[idx: idx + 3]):
+                        col.metric(label, safe_metric_fmt(value, kind=kind))
+
+                risk_df = pd.DataFrame(
+                    {
+                        "Metric": [m[0] for m in display_metrics],
+                        "Value": [m[1] for m in display_metrics],
+                    }
+                )
+                export_csv_button(risk_df, "⬇️ Export Risk Metrics CSV", f"{ticker_symbol}_risk_metrics.csv")
+                st.caption("Computed from daily closes over the selected range; VaR metrics reflect losses (negative values).")
 
         # --- Fundamentals ---
         with tabs[2]:

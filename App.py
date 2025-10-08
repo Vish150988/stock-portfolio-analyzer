@@ -77,6 +77,8 @@ def last_val(df: pd.DataFrame, col: str) -> float:
         return np.nan
 
 def safe_metric_fmt(val, kind="num"):
+    """Format scalars for metric display while tolerating pandas objects."""
+    val = get_scalar(val)
     if not isinstance(val, (int, float, np.floating)) or np.isnan(val):
         return "N/A"
     if kind == "money_b":
@@ -293,18 +295,45 @@ def compute_drawdown_curve(series: pd.Series) -> pd.Series:
     peak = series.cummax()
     return (series / peak) - 1.0
 
+def _normalize_price_series(close_like) -> pd.Series:
+    """Return a 1D float Series from many possible close-price inputs."""
+    if close_like is None:
+        return pd.Series(dtype=float)
+
+    if isinstance(close_like, pd.DataFrame):
+        if close_like.empty:
+            return pd.Series(dtype=float)
+        numeric = close_like.select_dtypes(include=[np.number])
+        if numeric.empty:
+            numeric = close_like.apply(pd.to_numeric, errors="coerce")
+        series = numeric.squeeze()
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+    elif isinstance(close_like, pd.Series):
+        series = close_like
+    else:
+        try:
+            series = pd.Series(close_like)
+        except Exception:
+            return pd.Series(dtype=float)
+
+    series = pd.to_numeric(series, errors="coerce")
+    return series.dropna()
+
+
 def compute_risk_metrics(close: pd.Series, risk_free_rate: float = 0.02) -> dict:
     """Return key risk metrics for a close-price series."""
-    if close is None or close.empty:
+    close_series = _normalize_price_series(close)
+    if close_series.empty:
         return {}
 
-    returns = close.pct_change().dropna()
+    returns = close_series.pct_change().dropna()
     if returns.empty:
         return {}
 
     stats: dict[str, float] = {}
-    daily_mean = returns.mean()
-    daily_vol = returns.std()
+    daily_mean = float(returns.mean())
+    daily_vol = float(returns.std())
 
     stats["daily_return"] = float(daily_mean)
     stats["daily_vol"] = float(daily_vol)
@@ -313,31 +342,31 @@ def compute_risk_metrics(close: pd.Series, risk_free_rate: float = 0.02) -> dict
     log_ret = np.log1p(returns)
     annual_return = float(np.exp(log_ret.mean() * 252) - 1)
     stats["annual_return"] = annual_return
-    annual_vol = float(daily_vol * np.sqrt(252)) if not np.isnan(daily_vol) else np.nan
+    annual_vol = float(daily_vol * np.sqrt(252)) if np.isfinite(daily_vol) else np.nan
     stats["annual_vol"] = annual_vol
 
     excess_return = annual_return - risk_free_rate
     stats["sharpe"] = (
         float(excess_return / annual_vol)
-        if annual_vol and not np.isnan(annual_vol)
+        if np.isfinite(annual_vol) and annual_vol != 0
         else np.nan
     )
 
-    downside = returns[returns < 0].std()
+    downside = float(returns[returns < 0].std())
     annual_downside = (
         float(downside * np.sqrt(252))
-        if downside and not np.isnan(downside)
+        if np.isfinite(downside) and downside != 0
         else np.nan
     )
     stats["sortino"] = (
         float(excess_return / annual_downside)
-        if annual_downside and not np.isnan(annual_downside)
+        if np.isfinite(annual_downside) and annual_downside != 0
         else np.nan
     )
 
     var_level = 0.95
-    var = returns.quantile(1 - var_level)
-    stats["var"] = float(var)
+    var = float(returns.quantile(1 - var_level))
+    stats["var"] = var
     tail = returns[returns <= var]
     stats["cvar"] = float(tail.mean()) if not tail.empty else np.nan
 

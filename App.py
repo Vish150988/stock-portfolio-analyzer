@@ -77,6 +77,8 @@ def last_val(df: pd.DataFrame, col: str) -> float:
         return np.nan
 
 def safe_metric_fmt(val, kind="num"):
+    """Format scalars for metric display while tolerating pandas objects."""
+    val = get_scalar(val)
     if not isinstance(val, (int, float, np.floating)) or np.isnan(val):
         return "N/A"
     if kind == "money_b":
